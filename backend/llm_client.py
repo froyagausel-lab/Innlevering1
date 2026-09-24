@@ -1,49 +1,61 @@
-"""LLM-klient for MatteHjelpen.
+import os
+import json
+from dotenv import load_dotenv
+from openai import OpenAI
 
-SKJELETT – TODO:
-- Les API_KEY, MODEL_NAME og API_BASE_URL fra .env (python-dotenv).
-- Bruk openai-biblioteket med base_url mot et OpenAI-kompatibelt API
-  (f.eks. OpenRouter, OpenAI selv, eller en annen leverandør).
-- SYSTEMPROMPT (viktig – ikke fjern kravene uten å forstå konsekvensen!):
+load_dotenv()
 
-  "Du er en matematikklærer for ingeniørstudenter. Bruk verktøyene (SymPy)
-  til all beregning når oppgaven lar seg beregne slik – du skal ALDRI late
-  som du har brukt et verktøy du ikke faktisk kalte. Kan oppgaven ikke
-  beregnes (f.eks. et bevis eller en begrepsforklaring), resonnerer du i
-  tekst og sier eksplisitt at svaret IKKE er verifisert av et verktøy.
-  Forklar hvert steg pedagogisk på norsk, og oppgi nøyaktig hvilke
-  formler/verktøy du faktisk brukte. Knytt hver formel-ID til steget der den
-  brukes, og ta med navn og referanse fra formelsamlingen.
-  Hvis du er usikker, si det eksplisitt."
+client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=os.getenv("OPENAI_API_KEY"),
+)
 
-  MERK: «all beregning gjøres via verktøy» gjelder ting SymPy faktisk kan
-  regne (derivasjon, ligninger, matriser, ...) – ikke bevis eller
-  begrepsforklaringer. Det er legitime matteoppgaver appen skal svare
-  ærlig på, uten å late som SymPy validerte noe den ikke kan validere.
-
-- ANTI-HALLUSINASJON: Ikke stol på at modellen forteller sant om egen
-  verktøybruk. Bygg verktøyloggen fra faktiske tool_calls. Modellen kan
-  foreslå formel-ID per steg, men ID-en må finnes i formelsamlingen; hent
-  navn og referanse derfra i stedet for å stole på fri tekst.
-
-- FORMELSAMLING: Send oppføringene fra formelsamling.py til modellen i et
-  kompakt format med ID, navn, formel, bruk og referanse. Kontroller at alle
-  returnerte formel-ID-er finnes i FORMELSAMLING. Formelreferanser forklarer
-  metoden; de beviser ikke at et SymPy-verktøy faktisk ble kalt.
-
-- Implementer tool-calling-løkke:
-  1) Send oppgaven + tool-definisjoner fra tools.py
-  2) Hvis modellen ber om tool-kall: kjør funksjonen, legg resultatet i samtalen
-  3) Gjenta til modellen gir endelig svar
-- Tell tokens (response.usage) og estimer kostnad.
-
-EKSPERIMENT-BRYTER: Sett USE_TOOLS = False og se hva som skjer med en billig
-modell. Dokumenter i EKSPERIMENT.md!
-"""
-
-USE_TOOLS = True  # <-- Aha-bryter nr. 1
-
+SYSTEM_PROMPT = """Du er en matematikklærer for ingeniørstudenter. Svar KUN i gyldig JSON-format.
+Formatet må være nøyaktig slik:
+{
+  "svar": "sluttresultat her (f.eks. 4)",
+  "steg": ["steg 1 forklaring", "steg 2 forklaring"],
+  "formler_brukt": []
+}"""
 
 def solve_task(oppgave: str) -> dict:
-    """Løs en matteoppgave via LLM + tools. Returner dict iht. SYSTEMBESKRIVELSE.md."""
-    raise NotImplementedError("Vibe code me! Se SYSTEMBESKRIVELSE.md")
+    try:
+        response = client.chat.completions.create(
+            model="nvidia/nemotron-3-ultra-550b-a55b:free",
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": oppgave}
+            ],
+            temperature=0.2
+        )
+
+        content = response.choices[0].message.content or "{}"
+        
+        # Vask bort eventuell markdown-formatering hvis modellen legger til ```json ... ```
+        if "```json" in content:
+            content = content.split("```json")[1].split("```")[0].strip()
+        elif "```" in content:
+            content = content.split("```")[1].split("```")[0].strip()
+
+        data = json.loads(content)
+        
+        tokens_used = response.usage.total_tokens if (response and response.usage) else 0
+
+        return {
+            "svar": str(data.get("svar", "Ingen svar levert")),
+            "steg": data.get("steg", []),
+            "formler_brukt": data.get("formler_brukt", []),
+            "verifisert": False,
+            "tokens_brukt": tokens_used,
+            "estimert_kostnad": 0.0
+        }
+
+    except Exception as e:
+        return {
+            "svar": f"Feil ved henting av svar: {str(e)}",
+            "steg": [],
+            "formler_brukt": [],
+            "verifisert": False,
+            "tokens_brukt": 0,
+            "estimert_kostnad": 0.0
+        }
